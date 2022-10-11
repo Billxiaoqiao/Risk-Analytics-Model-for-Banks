@@ -1,0 +1,465 @@
+---
+title: "AiP Group17 Assignment"
+author: "MSBA Group17"
+date: "11/21/2021"
+output:
+  pdf_document:
+    toc: yes
+    number_sections: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 999)
+```
+
+
+# Package installing
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(caTools)
+library(randomForest)
+library(caret)
+library(e1071)
+library(pROC)
+library(FSelector)
+library(rJava)
+library(CustomerScoringMetrics)
+library(gbm)
+library(ROSE)
+library(tree)
+library(maptree)
+library(nnet)
+library(Boruta)
+library(gridExtra)
+library(ggplot2)
+```
+
+
+# Data Preparation
+```{r, message=FALSE, warning=FALSE}
+# Import data
+credit.original <- read_csv("assignment_data.csv")
+summary(credit.original)
+
+# Count rows with NAs included
+sum(apply(credit.original, 1, anyNA))
+credit.data <- na.omit(credit.original) #remove NAs
+credit.data <- distinct(credit.data) #remove duplicated rows
+
+# Since no one has criminal history and ID is char and unused
+credit.data[c("CM_HIST", "ID")] <- NULL
+
+# Transfer the type of data
+names_factor <- c('GENDER' ,'EDUCATION', 'MARRIAGE', 'AGE_CTG', 'PY1', 'PY2', 
+                  'PY3', 'PY4', 'PY5', 'PY6', 'SATISFACTION', 'FREQTRANSACTION',
+                  'PHONE', 'DEPENDENT' , 'RSTATUS',  'OTH_ACCOUNT', 'CAR',  
+                  'YEARSINADD',  'SECONDHOME',  'EMPLOYMENT', 'NEW_CSTM', 'CLASS')
+credit.data[,names_factor] <- lapply(credit.data[,names_factor], as.factor)
+
+# Check the data
+str(credit.data)
+summary(credit.data)
+
+```
+
+
+# Split dataset
+```{r, message=FALSE, warning=FALSE}
+# Set a seed for split
+set.seed(175)
+partition = sample.split(credit.data$CLASS, SplitRatio = 0.80)
+
+# Split training and testing sets
+training = subset(credit.data, partition == TRUE)
+test = subset(credit.data, partition == FALSE)
+
+```
+
+
+# Data balancing
+```{r, message=FALSE, warning=FALSE}
+# Check the original proportion of classes
+prop.table(table(training$CLASS))
+
+# Apply both oversampling and undersampling techniques
+training.both <- ovun.sample(CLASS ~., data = training, method = "both", p=0.5, 
+                             seed=1)$data
+
+# Check the distribution of feature
+table(training.both$CLASS)
+
+# Check the proportion of classes
+prop.table(table(training.both$CLASS))
+
+```
+
+
+# Information gain & filter attributes for modelling
+```{r, message=FALSE, warning=FALSE}
+# Compute information gain values of the attributes
+attr_weights <- information.gain(CLASS ~., training.both)
+print(attr_weights)
+
+# Sort the weights
+sorted_weights <- attr_weights[order(attr_weights$attr_importance), , drop = F]
+sorted_weights
+
+# Plot the sorted weights
+barplot(unlist(sorted_weights), 
+        names.arg = rownames(sorted_weights), las = "2", cex.names=0.7,
+        ylim = c(0,0.09), space = 0.5, col = "steelblue")
+par(mar=c(8,4,4,4))
+
+# Filter features where the information gain is more than or equal to 0.0001
+numb_attr <- count(filter(attr_weights, attr_importance >= 0.0001))
+numb_attr # The adopted attribute number
+
+# Find the most informative n attributes at importance > 0.0001
+filtered_attributes <- cutoff.k(attr_weights, numb_attr$n)
+print(filtered_attributes)
+
+data.modelling <- training.both[filtered_attributes]
+data.modelling$CLASS <- training.both$CLASS
+
+# Apply Boruta to recheck importance variables
+boruta.model <- Boruta(CLASS~., data = data.modelling, doTrace = 2)
+print(boruta.model)
+
+```
+
+
+# Visualisation and test
+```{r, message=FALSE, warning=FALSE}
+# Correlation between numerical variables
+cordata = credit.data[,c(1,5,13:24,29)]
+corr <- round(cor(cordata), 2)
+corr
+
+# Correlation between numerical variables for class 1 (default)
+credit.filter <- credit.data %>%
+  filter(credit.data$CLASS == "1")
+cordata.df = credit.filter[,c(1,5,13:24,29)]
+corr.df <- round(cor(cordata.df), 2)
+corr.df
+
+# Relationship of Bills and Payments
+line(credit.data$PYAMT1, credit.data$BILL1)
+billpmt1 <- ggplot(credit.data, aes(colour = CLASS))+
+  geom_smooth(aes(PYAMT1,BILL1))
+billpmt2 <- ggplot(credit.data, aes(colour = CLASS))+
+  geom_smooth(aes(PYAMT2,BILL2))
+billpmt3 <- ggplot(credit.data, aes(colour = CLASS))+
+  geom_smooth(aes(PYAMT3,BILL3))
+billpmt4 <- ggplot(credit.data, aes(colour = CLASS))+
+  geom_smooth(aes(PYAMT4,BILL4))
+billpmt5 <- ggplot(credit.data, aes(colour = CLASS))+
+  geom_smooth(aes(PYAMT5,BILL5))
+billpmt6 <- ggplot(credit.data, aes(colour = CLASS))+
+  geom_smooth(aes(PYAMT6,BILL6))
+plot.bill.pmt <- grid.arrange(billpmt1,billpmt2,billpmt3,billpmt4,billpmt5,
+                              billpmt6)
+plot.bill.pmt
+
+credit.data %>%
+  ggplot(aes(AGE, LIMIT, colour = CLASS)) + geom_point(size = 0.25) + 
+  geom_smooth()
+
+credit.data %>%
+  ggplot(aes(EDUCATION, fill = CLASS)) + geom_bar(position = "stack")
+
+# Distributions of significant variables between classes of default and non-default customers
+m_limit <- credit.data %>%
+  group_by(CLASS) %>%
+  summarise(m.limit = mean(LIMIT))
+
+ggplot(training, aes(x = LIMIT, fill = CLASS)) + 
+  geom_density(alpha = 0.7) + 
+  ylab("Density")+ xlab("Limit Credit") +
+  scale_fill_manual(name="Customer Class",
+                    breaks = c("0","1"),
+                    labels = c("Non-default", "Default"),
+                    values = c("#386cb0","#fdb462")) +
+  labs(title = "Distribution of Credit Limit", 
+       subtitle = "Comparing between classes of customers") +
+  theme(plot.title = element_text(hjust = 0.5, vjust = 0.2, face = "bold"), 
+        plot.subtitle = element_text(hjust = 0.5)) +
+  geom_vline(data= m_limit, mapping = aes(xintercept = m.limit), colour = "red", 
+             linetype = "longdash") +
+  geom_label(data = m_limit, aes(x = m.limit, y = 0, 
+                                 label = round(m.limit, digits =0)), 
+             colour = "black", size = 3) +
+xlim(0,540000)
+
+```
+
+
+# Modelling
+
+## Decision Tree
+ 
+```{r, message=FALSE, warning=FALSE}
+# Build the decision tree
+dtree <- tree(CLASS ~., data.modelling, 
+              control = tree.control(nrow(data.modelling), mindev = 0.01))
+summary(dtree)
+print(dtree)
+draw.tree(dtree)
+
+# Predict the class in test set
+dtree_predict <- predict(dtree, test, type = "class")
+
+# Find the percentage of correct predictions
+accuracy_dtree <- length(which(dtree_predict == test$CLASS))/nrow(test)
+accuracy_dtree
+
+# Confusion Matrix of Decision Tree
+matrix_dt <- confusionMatrix(dtree_predict, test$CLASS, positive='1', 
+                             mode = "prec_recall")
+matrix_dt
+
+```
+
+
+## SVM Model
+ 
+```{r, message=FALSE, warning=FALSE}
+
+# Build an SVM model
+SVM_model <- svm(CLASS~., data = data.modelling, kernel = "radial", scale = TRUE,
+                 probability = TRUE)
+
+# Predicting the test set results
+SVM_predict <- predict(SVM_model, test)
+SVMpred <- predict(SVM_model, test, probability = TRUE)
+SVM_prob <- attr(SVMpred, "probabilities")
+
+# Find the percentage of correct predictions
+accuracy_SVM <- length(which(SVM_predict == test$CLASS))/nrow(test)
+accuracy_SVM
+
+# Confusion Matrix of Support Vector Machine
+matrix_SVM <- confusionMatrix(SVM_predict, test$CLASS, positive='1', 
+                              mode = "prec_recall")
+matrix_SVM
+
+```
+
+
+## Random Forest
+ 
+```{r, message=FALSE, warning=FALSE}
+# List of possible values for mtry, nodesize and sampsize
+mtry_val <- seq(7,10,15)
+nodesize_val <- seq(1, 10, 5)
+sampsize_val <- floor(nrow(data.modelling)*c(0.5, 0.65, 0.8))
+
+# Create a data frame containing all combinations 
+setOfvalues <- expand.grid(mtry = mtry_val, nodesize = nodesize_val, 
+                           sampsize = sampsize_val)
+
+# Create an empty vector to store error values
+err <- c()
+
+# Train random forest model for all possible values
+for (i in 1:nrow(setOfvalues)){
+    set.seed(175)
+    model <- randomForest(CLASS~., data.modelling,
+                          mtry = setOfvalues$mtry[i],
+                          nodesize = setOfvalues$nodesize[i],
+                          sampsize = setOfvalues$sampsize[i])
+    err[i] <- model$err.rate[nrow(model$err.rate), "OOB"]
+}
+
+# Identify optimal set of hyper-parameters based on the error rate
+best_comb <- which.min(err)
+print(setOfvalues[best_comb,])
+
+# Build the RF model with the best performed parameter value
+RF_model <- randomForest(CLASS ~. , data.modelling, 
+                         mtry= setOfvalues[best_comb,1], 
+                         nodesize = setOfvalues[best_comb,2], 
+                         sampsize= setOfvalues[best_comb,3])
+  
+# Predict the class of the test data
+RF_predict <- predict(RF_model, test)
+accuracy_RF <- length(which(RF_predict == test$CLASS))/nrow(test)
+accuracy_RF
+
+# Confusion Matrix of Random Forest
+matrix_RF <- confusionMatrix(RF_predict, test$CLASS, positive='1', 
+                             mode = "prec_recall")
+matrix_RF
+
+```
+
+
+## Logistic Regression
+ 
+```{r, message=FALSE, warning=FALSE}
+# Build a logistic regression model
+LR_model <- glm(CLASS ~., data = data.modelling, family = "binomial")
+
+# Predict the class probabilities of the test data
+LR_prob <- predict.glm(LR_model, test, type = "response")
+
+# Predict the class 
+LR_class <- ifelse(LR_prob >= 0.5, "1", "0")
+LR_class <- as.factor(LR_class)
+
+# Find the percentage of correct predictions
+accuracy_LR <- length(which(LR_class == test$CLASS))/nrow(test)
+accuracy_LR
+
+# Confusion Matrix of Logistic Regression
+matrix_LR <- confusionMatrix(LR_class, test$CLASS, positive='1', 
+                             mode = "prec_recall")
+matrix_LR
+
+```
+
+
+## BP Neural Network
+ 
+```{r, message=FALSE, warning=FALSE}
+
+# Build a BP Neural Network model
+BP_model <- nnet(CLASS~., data.modelling, size = 18, MaxNWts = 2185)
+
+# Predict the class 
+BP_prob <- predict(BP_model, test, probability = TRUE)
+BP_pred <- ifelse(BP_prob >= 0.5, "1", "0")
+BP_pred <- as.factor(BP_pred)
+
+# Find the percentage of correct predictions
+accuracy_BP <- length(which(BP_pred == test$CLASS))/nrow(test)
+accuracy_BP
+
+# Confusion Matrix of BP neural network
+matrix_BP <- confusionMatrix(BP_pred, test$CLASS, positive = '1', 
+                             mode = "prec_recall")
+matrix_BP
+
+```
+
+
+## GBM
+ 
+```{r, message=FALSE, warning=FALSE}
+set.seed(175)
+
+data.modelling.gbm <- data.modelling
+data.modelling.gbm$CLASS = as.numeric(data.modelling.gbm$CLASS)-1
+
+# Build the GBM model
+GBM_model <- gbm(CLASS ~., data.modelling.gbm, distribution = "bernoulli",
+                 n.trees = 1000, interaction.depth = 3, cv.folds = 20)
+
+# Find the number of trees for the prediction
+ntree_opt <- gbm.perf(GBM_model, method = "cv")
+ntree_opt
+
+# Obtain prediction probabilities using ntree_opt
+GBM_prob <-  predict(GBM_model, test, n.trees = ntree_opt, type = "response")
+
+# Make predictions with threshold value 0.5
+GBM_pred <- ifelse(GBM_prob >= 0.57, "1", "0")
+
+# Save the predictions as a factor variable
+GBM_pred <- as.factor(GBM_pred)
+
+# Confusion matrix of Gradient Boost Machine
+matrix_GBM <- confusionMatrix(GBM_pred, test$CLASS, positive='1', 
+                              mode = "prec_recall")
+matrix_GBM
+
+```
+
+
+# Evaluation
+
+## ROC & AUC
+```{r, message=FALSE, warning=FALSE}
+# dtree
+dtree_prob <- predict(dtree, test, type = "vector")
+dtree_ROC <- roc(test$CLASS, dtree_prob[,2])
+df_dtree = data.frame((1-dtree_ROC$specificities), dtree_ROC$sensitivities)
+
+# SVM
+SVM_ROC <- roc(test$CLASS, SVM_prob[,2])
+df_SVM = data.frame((1-SVM_ROC$specificities), SVM_ROC$sensitivities)
+
+# LR
+LR_prob <- predict(LR_model, test, type = "response")
+LR_ROC <- roc(test$CLASS, LR_prob)
+df_LR = data.frame((1-LR_ROC$specificities), LR_ROC$sensitivities)
+LR_ROC
+
+# RF
+RF_prob <- predict(RF_model, test, type = "prob")
+RF_ROC <- roc(test$CLASS, RF_prob[,2])
+df_RF = data.frame((1-RF_ROC$specificities), RF_ROC$sensitivities)
+
+# BP
+ROC_BP <- roc(test$CLASS, BP_prob)
+df_BP = data.frame((1-ROC_BP$specificities), ROC_BP$sensitivities)
+
+# GBM
+GBM_ROC <- roc(test$CLASS, GBM_prob)
+df_GBM = data.frame((1-GBM_ROC$specificities), GBM_ROC$sensitivities)
+
+# Calculate the area under the curve (AUC)
+auc(dtree_ROC)
+auc(SVM_ROC)
+auc(LR_ROC)
+auc(RF_ROC)
+auc(ROC_BP)
+auc(GBM_ROC)
+
+# Plot ROC chart
+plot(df_dtree, col="orange",type="l",    # First add ROC curve for Decision Tree
+xlab="False Positive Rate (1-Specificity)",
+ylab="True Positive Rate (Sensitivity)")
+lines(df_SVM, col="green")
+lines(df_RF, col="red")
+lines(df_LR, col="blue")
+lines(df_BP, col="pink")
+lines(df_GBM, col="purple")
+abline(a = 0, b = 1, col = "lightgray") # Add a diagonal line
+legend("bottomright",
+c("Decision Tree", 'SVM', "RF",'LR','BP','GBM'),
+fill=c("orange", 'green', "red",'blue',"pink","purple"))
+
+```
+
+
+# Evaluation
+
+## Gain Table
+```{r, message=FALSE, warning=FALSE}
+# Extract the gain values for Gain chart
+GainTable_dtree <- cumGainsTable(dtree_prob[,2], test$CLASS, resolution = 1/100)
+GainTable_SVM <- cumGainsTable(SVM_prob[,2], test$CLASS, resolution = 1/100)
+GainTable_RF <- cumGainsTable(RF_prob[,2], test$CLASS, resolution = 1/100)
+GainTable_LR <- cumGainsTable(LR_prob, test$CLASS, resolution = 1/100)
+GainTable_BP <- cumGainsTable(BP_prob, test$CLASS, resolution = 1/100)
+GainTable_GBM <- cumGainsTable(GBM_prob, test$CLASS, resolution = 1/100)
+
+# Plot the Gain charts
+plot(GainTable_dtree[,4], col="orange", type="l", 
+     xlab="Percentage of test instances", 
+     ylab="Percentage of correct predictions")
+lines(GainTable_SVM[,4], col="green", type ="l")
+lines(GainTable_RF[,4], col="red", type ="l")
+lines(GainTable_LR[,4], col="blue", type ="l")
+lines(GainTable_BP[,4], col="pink", type ="l")
+lines(GainTable_GBM[,4], col="purple", type ="l")
+abline(a = 0, b = 1, col = "lightgray")
+legend("bottomright",
+c("Decision Tree", 'SVM', "RF",'LR','BP','GBM'),
+fill=c("orange", 'green', "red",'blue',"pink","purple"))
+
+```
